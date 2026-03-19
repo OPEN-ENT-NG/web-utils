@@ -38,6 +38,8 @@ import java.security.*;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.interfaces.RSAPublicKey;
 import java.security.spec.*;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -512,6 +514,38 @@ public final class JWT {
 		sign.update(sb.toString().getBytes("UTF-8"));
 		sb.append(".").append(base64Encode(sign.sign()));
 		return sb.toString();
+	}
+
+	public static JsonObject generateJwks(final JsonObject certs) {
+		final JsonArray ja = new JsonArray();
+		try {
+			for (String kid : certs.fieldNames()) {
+				final String pemCert = certs.getString(kid);
+				final X509Certificate cert;
+				cert = (X509Certificate) CertificateFactory.getInstance("X.509")
+						.generateCertificate(new ByteArrayInputStream(pemCert.getBytes()));
+				final RSAPublicKey pubKey = (RSAPublicKey) cert.getPublicKey();
+				final String n = Base64.getUrlEncoder().withoutPadding()
+						.encodeToString(pubKey.getModulus().toByteArray());
+				final String e = Base64.getUrlEncoder().withoutPadding()
+						.encodeToString(pubKey.getPublicExponent().toByteArray());
+
+				final String x5c = Base64.getEncoder().encodeToString(cert.getEncoded());
+
+				ja.add(new JsonObject()
+						.put("kty", "RSA")
+						.put("use", "sig")
+						.put("alg", "RS256")
+						.put("kid", kid)
+						.put("n", n)
+						.put("e", e)
+						.put("x5c", new JsonArray().add(x5c))
+				);
+			}
+		} catch (Exception e) {
+			log.error(e.getMessage(), e);
+		}
+		return new JsonObject().put("keys", ja);
 	}
 
 }
