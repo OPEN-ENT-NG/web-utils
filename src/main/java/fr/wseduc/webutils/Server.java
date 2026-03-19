@@ -32,6 +32,7 @@ import fr.wseduc.webutils.logging.TracerFactory;
 import fr.wseduc.webutils.metrics.EventBusProbe;
 import fr.wseduc.webutils.metrics.HealthCheckProbe;
 import fr.wseduc.webutils.metrics.HealthCheckProbeResult;
+import fr.wseduc.webutils.metrics.ZookeeperProbe;
 import fr.wseduc.webutils.request.CookieHelper;
 import fr.wseduc.webutils.request.filter.Filter;
 import fr.wseduc.webutils.request.filter.SecurityHandler;
@@ -41,12 +42,14 @@ import io.vertx.core.eventbus.EventBus;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.impl.VertxInternal;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import io.vertx.core.shareddata.LocalMap;
 
+import io.vertx.spi.cluster.zookeeper.ZookeeperClusterManager;
 import org.vertx.java.core.http.RouteMatcher;
 
 import java.io.IOException;
@@ -101,48 +104,60 @@ public abstract class Server extends AbstractVerticle {
    * @return A future that completes when the initialization of all probes is done.
    */
   private Future<Void> initializeProbes() {
-    this.probeTimeout = config.getLong("probes-timeout", 10_000L);
-    final List<Future<HealthCheckProbe>> probes = new ArrayList<>();
+    this.probeTimeout = config.getLong("probes-timeout", 5_000L);
+    final List<Future<HealthCheckProbe>> probes = new ArrayList<>(getDefaultProbes());
     final JsonArray probesConf = config.getJsonArray("probes");
-    if(probesConf == null) {
-      final EventBusProbe probe = new EventBusProbe();
-      probes.add(probe.init(vertx, null).map(probe));
-    } else {
-      for (Object o : probesConf) {
-        final String probeClassName;
-        final JsonObject conf;
-        if(o instanceof String) {
-          probeClassName = (String) o;
-          conf = new JsonObject();
-        } else if(o instanceof JsonObject) {
-          final JsonObject jo = (JsonObject) o;
-          probeClassName = jo.getString("name");
-          conf = jo.getJsonObject("config");
-        } else {
-          log.error("We expect the probes to be a list of string with the name of the probes or an object");
-          continue;
-        }
-        try {
-          final Class<?> probeClass = Class.forName(probeClassName);
-          if(!HealthCheckProbe.class.isAssignableFrom(probeClass)) {
-            log.error("Specified class " + probeClassName + " is not a probe class");
-            continue;
-          }
-          final HealthCheckProbe probe = (HealthCheckProbe) probeClass.newInstance();
-          probes.add(probe.init(vertx, conf).map(probe));
-        } catch (ClassNotFoundException | InstantiationException | IllegalAccessException e) {
-          log.error("Cannot instantiate probe " + probeClassName, e);
-        }
-      }
-    }
+	if(probesConf != null) {
+		for (Object o : probesConf) {
+			final String probeClassName;
+			final JsonObject conf;
+			if (o instanceof String) {
+				probeClassName = (String) o;
+				conf = new JsonObject();
+			} else if (o instanceof JsonObject) {
+				final JsonObject jo = (JsonObject) o;
+				probeClassName = jo.getString("name");
+				conf = jo.getJsonObject("config");
+			} else {
+				log.error("We expect the probes to be a list of string with the name of the probes or an object");
+				continue;
+			}
+			try {
+				final Class<?> probeClass = Class.forName(probeClassName);
+				if (!HealthCheckProbe.class.isAssignableFrom(probeClass)) {
+					log.error("Specified class " + probeClassName + " is not a probe class");
+					continue;
+				}
+				final HealthCheckProbe probe = (HealthCheckProbe) probeClass.newInstance();
+				probes.add(probe.init(vertx, conf).map(probe));
+			} catch (ClassNotFoundException | InstantiationException | IllegalAccessException e) {
+				log.error("Cannot instantiate probe " + probeClassName, e);
+			}
+		}
+	}
     return Future.all(probes)
       .map(CompositeFuture::list)
       .onSuccess(ps -> this.probes.addAll((List)ps))
       .mapEmpty();
   }
 
+    private List<? extends Future<HealthCheckProbe>> getDefaultProbes() {
+	  final List<Future<HealthCheckProbe>> defaultProbes = new ArrayList<>();
+	  log.debug("Adding EventBus probe");
+	  final EventBusProbe eventBusProbe = new EventBusProbe();
+      defaultProbes.add(eventBusProbe.init(vertx, null).map(eventBusProbe));
+	  if(vertx.isClustered() && ((VertxInternal) vertx).getClusterManager() instanceof ZookeeperClusterManager) {
+		  log.debug("Adding ZK probe");
+		  final ZookeeperProbe zkProbe = new ZookeeperProbe();
+		  defaultProbes.add(zkProbe.init(vertx, config()).map(zkProbe));
+	  } else {
+		  log.debug("Skipping ZK prob");
+	  }
+      return defaultProbes;
+    }
 
-  public void init(Promise<Void> startPromise, Map<String,String> serverConfig) {
+
+	public void init(Promise<Void> startPromise, Map<String,String> serverConfig) {
 		CookieHelper.getInstance().init(
 				serverConfig.get("signKey"), serverConfig.get("sameSiteValue"), log);
 		staticRessources = vertx.sharedData().getLocalMap("staticRessources"); // TODO JBER
@@ -343,7 +358,7 @@ public abstract class Server extends AbstractVerticle {
 	}
 
 	protected Future<Server> addController(BaseController controller) {
-		log.info("add controller : " + controller.getClass().getName());
+		log.debug("add controller : " + controller.getClass().getName());
 		return controller.initAsync(vertx, config, rm, securedActions)
       .map(e -> {
           securedUriBinding.addAll(controller.securedUriBinding());

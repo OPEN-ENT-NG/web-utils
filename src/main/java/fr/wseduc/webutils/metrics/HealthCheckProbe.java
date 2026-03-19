@@ -31,7 +31,7 @@ public interface HealthCheckProbe {
     long timer = vertx.setTimer(timeout, e -> promise.tryComplete(new HealthCheckProbeResult(
       this.getName(), false,
       new JsonObject().put("delay", currentTimeMillis() - start).put("aborted", true))));
-    probe().onSuccess(e -> {
+    vertx.setTimer(1L, taskId -> probe().onSuccess(e -> {
       vertx.cancelTimer(timer);
       final long delay = currentTimeMillis() - start;
       JsonObject md = e.getMetadata();
@@ -39,7 +39,7 @@ public interface HealthCheckProbe {
         md = new JsonObject();
       }
       promise.tryComplete(new HealthCheckProbeResult(e.getName(), e.isOk(), md.put("delay", delay)));
-    }).onFailure(promise::fail);
+    }).onFailure(promise::fail));
     return promise.future();
   }
 
