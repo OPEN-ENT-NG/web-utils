@@ -8,6 +8,8 @@ import io.vertx.core.eventbus.EventBus;
 import io.vertx.core.eventbus.Message;
 import io.vertx.core.json.JsonObject;
 
+import java.util.UUID;
+
 import static java.lang.System.currentTimeMillis;
 
 /**
@@ -29,14 +31,14 @@ public class EventBusProbe implements HealthCheckProbe {
     local = configuration.getBoolean("local", true);
     maxTime = configuration.getLong("max-time", 20L);
     probeName = "eventbus-" + (local ? "local" : "remote");
-    probesSubject = "probes." + currentTimeMillis();
+    probesSubject = probeName;
     this.vertx = vertx;
     eventBus = vertx.eventBus();
-    final Handler<Message<Object>> handler = e -> e.reply(new JsonObject().put("status", "ok"));
+    final Handler<Message<Object>> handler = e -> e.reply(new JsonObject()
+            .put("status", "ok")
+            .put("responder", configuration.getString("id", UUID.randomUUID().toString())));
     if(local) {
       eventBus.localConsumer(probesSubject).handler(handler);
-    } else {
-      eventBus.consumer(probesSubject).handler(handler);
     }
     return Future.succeededFuture();
   }
@@ -54,7 +56,10 @@ public class EventBusProbe implements HealthCheckProbe {
   @Override
   public Future<HealthCheckProbeResult> probe() {
     final long start = currentTimeMillis();
-    return eventBus.request(probesSubject, new JsonObject().put("payload", "42"), new DeliveryOptions().setLocalOnly(local))
-      .map(response -> new HealthCheckProbeResult(getName(), (currentTimeMillis() - start) <= maxTime, null));
+    return eventBus.request(local ? probesSubject : "probes.eventbus.remote", new JsonObject().put("payload", "42"), new DeliveryOptions().setLocalOnly(local))
+      .map(response -> new HealthCheckProbeResult(
+              getName(),
+              (currentTimeMillis() - start) <= maxTime,
+              new JsonObject().put("responder", ((JsonObject)response.body()).getString("responder"))));
   }
 }

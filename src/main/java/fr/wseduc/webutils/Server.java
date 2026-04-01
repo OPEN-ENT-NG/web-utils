@@ -85,7 +85,8 @@ public abstract class Server extends AbstractVerticle {
 			i18n.init(vertx);
 			final SharedDataHelper sharedDataHelper = SharedDataHelper.getInstance();
 			sharedDataHelper.init(vertx);
-      initializeProbes()
+			final String id = this.getClass().getSimpleName() + "-" + UUID.randomUUID();
+      initializeProbes(id)
       .onSuccess(e -> {
         sharedDataHelper.<String, String>getLocalMulti("server", "signKey", "sameSiteValue", "httpServerOptions")
           .onSuccess(serverMap -> init(startPromise, serverMap))
@@ -103,9 +104,9 @@ public abstract class Server extends AbstractVerticle {
    *    - config, which is a JsonObject containing configuration parameters for the probe
    * @return A future that completes when the initialization of all probes is done.
    */
-  private Future<Void> initializeProbes() {
+  private Future<Void> initializeProbes(final String id) {
     this.probeTimeout = config.getLong("probes-timeout", 5_000L);
-    final List<Future<HealthCheckProbe>> probes = new ArrayList<>(getDefaultProbes());
+    final List<Future<HealthCheckProbe>> probes = new ArrayList<>(getDefaultProbes(id));
     final JsonArray probesConf = config.getJsonArray("probes");
 	if(probesConf != null) {
 		for (Object o : probesConf) {
@@ -122,6 +123,7 @@ public abstract class Server extends AbstractVerticle {
 				log.error("We expect the probes to be a list of string with the name of the probes or an object");
 				continue;
 			}
+			conf.put("id", id);
 			try {
 				final Class<?> probeClass = Class.forName(probeClassName);
 				if (!HealthCheckProbe.class.isAssignableFrom(probeClass)) {
@@ -141,11 +143,16 @@ public abstract class Server extends AbstractVerticle {
       .mapEmpty();
   }
 
-    private List<? extends Future<HealthCheckProbe>> getDefaultProbes() {
+    private List<? extends Future<HealthCheckProbe>> getDefaultProbes(final String id) {
 	  final List<Future<HealthCheckProbe>> defaultProbes = new ArrayList<>();
 	  log.debug("Adding EventBus probe");
 	  final EventBusProbe eventBusProbe = new EventBusProbe();
-      defaultProbes.add(eventBusProbe.init(vertx, null).map(eventBusProbe));
+      defaultProbes.add(eventBusProbe.init(vertx, new JsonObject().put("local", true).put("id", id)).map(eventBusProbe));
+	  if(vertx.isClustered()) {
+		  log.debug("Adding clustered EventBus probe");
+		  final EventBusProbe clusteredEventBusProbe = new EventBusProbe();
+		  defaultProbes.add(clusteredEventBusProbe.init(vertx, new JsonObject().put("local", false).put("id", id)).map(clusteredEventBusProbe));
+	  }
 	  if(vertx.isClustered() && ((VertxInternal) vertx).getClusterManager() instanceof ZookeeperClusterManager) {
 		  log.debug("Adding ZK probe");
 		  final ZookeeperProbe zkProbe = new ZookeeperProbe();
