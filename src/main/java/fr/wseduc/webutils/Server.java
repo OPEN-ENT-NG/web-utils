@@ -71,6 +71,7 @@ public abstract class Server extends AbstractVerticle {
 	private HttpServer server;
   private final List<HealthCheckProbe> probes = new ArrayList<>();
   private long probeTimeout = 10_000L;
+  private ZookeeperClusterManager zkClusterManager;
 
 	@Override
 	public void start(Promise<Void> startPromise) throws Exception {
@@ -78,6 +79,9 @@ public abstract class Server extends AbstractVerticle {
 		super.start(vertxPromise);
 		vertxPromise.future().onSuccess(x -> {
 			config = config();
+			if (vertx.isClustered() && ((VertxInternal) vertx).getClusterManager() instanceof ZookeeperClusterManager) {
+				zkClusterManager = (ZookeeperClusterManager) ((VertxInternal) vertx).getClusterManager();
+			}
 			FileResolver.getInstance().setBasePath(config);
 			rm = new RouteMatcher();
 			trace = TracerFactory.getTracer(this.getClass().getSimpleName());
@@ -219,7 +223,22 @@ public abstract class Server extends AbstractVerticle {
 			}
 		});
 
-    rm.get(prefix + "/health/liveness", event -> Controller.renderJson(event, new JsonObject().put("test", "ok")));
+    rm.get(prefix + "/health/liveness", event -> {
+      if (zkClusterManager != null) {
+        final String nodeId = zkClusterManager.getNodeId();
+        if (zkClusterManager.getNodes().contains(nodeId)) {
+          Controller.renderJson(event, new JsonObject().put("test", "ok").put("nodeId", nodeId));
+        } else {
+          log.warn("Liveness check failed: node " + nodeId + " not found in cluster nodes");
+          Controller.renderError(event, new JsonObject()
+            .put("test", "ko")
+            .put("error", "Node not registered in cluster")
+			.put("nodeId", nodeId));
+        }
+      } else {
+        Controller.renderJson(event, new JsonObject().put("test", "ok"));
+      }
+    });
 
     rm.get(prefix + "/health/readiness", event -> {
       final List<Future<HealthCheckProbeResult>> futures = probes.stream()

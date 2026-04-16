@@ -45,6 +45,12 @@ public class ZookeeperProbe implements HealthCheckProbe {
     }
 
     final Promise<HealthCheckProbeResult> promise = Promise.promise();
+    final String nodeId = zookeeperClusterManager.getNodeId();
+    if(!zookeeperClusterManager.getNodes().contains(nodeId)) {
+      log.warn("Current node " + nodeId + " not in known nodes " + zookeeperClusterManager.getNodes());
+      return succeededFuture(new HealthCheckProbeResult(getName(), false,
+              new JsonObject().put("error", "unknown.node.id")));
+    }
     try {
       final CuratorFramework curatorFramework = zookeeperClusterManager.getCuratorFramework();
       
