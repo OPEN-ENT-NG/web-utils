@@ -115,9 +115,9 @@ public class SendInBlueSender extends NotificationHelper implements EmailSender 
 				.setHeaders(new HeadersMultiMap().add("api-key", apiKey)))
 				.flatMap(request -> request.send(payload.encode()))
 				.flatMap(HttpClientResponse::body)
-				.map(buffer -> new JsonObject(buffer.toString()))
-				.onSuccess(res -> {
+				.onSuccess(body -> {
 					try {
+						final JsonObject res = new JsonObject(body.toString());
 						if ("success".equals(res.getString("code"))) {
 							JsonArray l = res.getJsonArray("data");
 							if (l == null || l.size() == 0) {
@@ -134,7 +134,7 @@ public class SendInBlueSender extends NotificationHelper implements EmailSender 
 						}
 					} catch (RuntimeException | IOException e) {
 						handler.handle(new Either.Left<>(e.getMessage()));
-						log.error(e.getMessage(), e);
+						log.error("Error when fetching harbounced emails from SendInBlue. Received body is : " + body.toString(), e);
 					}
 				})
 				.onFailure(except -> log.error("Error when query hardbounce to sendinblue.", except));
