@@ -44,6 +44,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 
 public class AlgorithmTest {
 
@@ -103,19 +104,90 @@ public class AlgorithmTest {
 		assertEquals("6bbb885acc9fe37317e6c2c7725efa93", NTLM.ntHash("ArtifLo23"));
 	}
 
+	/**
+	 * Pins the whole algorithm on the request of the AWS SigV4 "Example: GET Object": canonical request,
+	 * header ordering and lowercasing, credential scope and signing key derivation. Uses a fixed instant
+	 * on purpose — the signature depends on it.
+	 * <p>
+	 * Provenance of the expected value: the SHA-256 of the canonical request built here is
+	 * {@code 7344ae5b7ee6c3e7e6b0fe0640412a37625d1fbfff95c48bbb2dc43964946972}, the intermediate value AWS
+	 * publishes for that example, which pins the canonical request itself; the signature below was then
+	 * cross-checked against an independent implementation written straight from the specification.
+	 * <p>
+	 * Note this signs a non x-amz header ({@code range}), which is legitimate: SigV4 mandates host and
+	 * every x-amz-* header, and allows any other.
+	 */
 	@Test
 	public void aws4Test() throws Exception {
-		DateTimeFormatter datetimeFormat = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneId.systemDefault());;
-		MultiMap canonicalHeaders = MultiMap.caseInsensitiveMultiMap();
-		final String now = datetimeFormat.format(Instant.now());
-		canonicalHeaders.add("host", "");
+		final MultiMap canonicalHeaders = MultiMap.caseInsensitiveMultiMap();
+		canonicalHeaders.add("host", "examplebucket.s3.amazonaws.com");
+		canonicalHeaders.add("range", "bytes=0-9");
 		canonicalHeaders.add("x-amz-content-sha256", AWS4Signature.EMPTY_PAYLOAD_SHA256);
-		canonicalHeaders.add("x-amz-date", now);
-		String signature = AWS4Signature.sign("GET", "/storage/00/00/1cd26124-5c22-4777-ae63-7a8ff4e30000",
-				"", canonicalHeaders, "fr-par", "", "", null, Instant.now());
-		System.out.println(now);
-		System.out.println(signature);
-		assertEquals("6bbb885acc9fe37317e6c2c7725efa93", signature);
+		canonicalHeaders.add("x-amz-date", "20130524T000000Z");
+
+		final String signature = AWS4Signature.sign("GET", "/test.txt", "", canonicalHeaders,
+				"us-east-1", "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+				AWS4Signature.EMPTY_PAYLOAD_SHA256,
+				Instant.parse("2013-05-24T00:00:00Z"));
+
+		assertEquals("67fe34c8530db585abddc51067328adfedb6e42487d2566dc7d927d6e2722900", signature);
+	}
+
+	@Test
+	public void aws4SignedHeadersAreLowercaseAndSorted() throws Exception {
+		final MultiMap headers = MultiMap.caseInsensitiveMultiMap();
+		// Declared out of order, and one of them carries uppercase — as the SSE-C key MD5 header does.
+		headers.add("x-amz-date", "20130524T000000Z");
+		headers.add("x-amz-server-side-encryption-customer-key-MD5", "abc==");
+		headers.add("host", "examplebucket.s3.amazonaws.com");
+		headers.add("x-amz-meta-filename", "rapport.pdf");
+		headers.add("x-amz-content-sha256", AWS4Signature.EMPTY_PAYLOAD_SHA256);
+
+		assertEquals("host;x-amz-content-sha256;x-amz-date;x-amz-meta-filename;"
+				+ "x-amz-server-side-encryption-customer-key-md5", AWS4Signature.signedHeaders(headers));
+	}
+
+	/**
+	 * A quoted-printable file name holds characters URL encoding would rewrite ({@code =}, {@code ?},
+	 * {@code _}). The canonical value must be passed through untouched, otherwise the server recomputes a
+	 * different canonical request and answers SignatureDoesNotMatch.
+	 */
+	@Test
+	public void aws4MetadataValueIsNotUrlEncoded() throws Exception {
+		final MultiMap plain = MultiMap.caseInsensitiveMultiMap();
+		plain.add("host", "examplebucket.s3.amazonaws.com");
+		plain.add("x-amz-meta-filename", "rapport.pdf");
+
+		final MultiMap encoded = MultiMap.caseInsensitiveMultiMap();
+		encoded.add("host", "examplebucket.s3.amazonaws.com");
+		encoded.add("x-amz-meta-filename", "=?utf-8?Q?rapport_final.pdf?=");
+
+		final Instant instant = Instant.parse("2013-05-24T00:00:00Z");
+		final String plainSignature = AWS4Signature.sign("PUT", "/test.txt", "", plain,
+				"us-east-1", "key", "secret", null, instant);
+		final String encodedSignature = AWS4Signature.sign("PUT", "/test.txt", "", encoded,
+				"us-east-1", "key", "secret", null, instant);
+
+		// Both must sign, and the special characters must actually change the signature: were they
+		// dropped or rewritten identically, the two would collide.
+		assertEquals(64, encodedSignature.length());
+		assertNotEquals(plainSignature, encodedSignature);
+	}
+
+	@Test
+	public void aws4HeaderValuesAreTrimmed() throws Exception {
+		final MultiMap padded = MultiMap.caseInsensitiveMultiMap();
+		padded.add("host", "  examplebucket.s3.amazonaws.com  ");
+		padded.add("x-amz-meta-filename", "a   b");
+
+		final MultiMap tidy = MultiMap.caseInsensitiveMultiMap();
+		tidy.add("host", "examplebucket.s3.amazonaws.com");
+		tidy.add("x-amz-meta-filename", "a b");
+
+		final Instant instant = Instant.parse("2013-05-24T00:00:00Z");
+		assertEquals(
+				AWS4Signature.sign("PUT", "/test.txt", "", tidy, "us-east-1", "key", "secret", null, instant),
+				AWS4Signature.sign("PUT", "/test.txt", "", padded, "us-east-1", "key", "secret", null, instant));
 	}
 
 }

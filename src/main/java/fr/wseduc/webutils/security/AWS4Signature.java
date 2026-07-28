@@ -17,14 +17,15 @@
 package fr.wseduc.webutils.security;
 
 import java.io.UnsupportedEncodingException;
-import java.net.URLEncoder;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.Locale;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.SortedMap;
+import java.util.TreeMap;
 
 import fr.wseduc.webutils.Utils;
 import io.vertx.core.MultiMap;
@@ -33,6 +34,8 @@ import io.vertx.core.http.HttpClientRequest;
 public class AWS4Signature {
 
     public static final String EMPTY_PAYLOAD_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    /** Prefix of the headers SigV4 makes mandatory to sign. */
+    private static final String AMZ_HEADER_PREFIX = "x-amz-";
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneId.of("Z"));
     private static final DateTimeFormatter DATETIME_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneId.of("Z"));
 
@@ -47,14 +50,13 @@ public class AWS4Signature {
 
         final String hashPayload = (payloadSha256 != null ? payloadSha256: EMPTY_PAYLOAD_SHA256);
 
-        final StringBuilder headersNames = new StringBuilder();
-        for (Map.Entry<String, String> h : canonicalHeaders.entries()) {
-            headersNames.append(h.getKey()).append(";");
-            canonicalRequest.append(h.getKey().toLowerCase()).append(":")
-                    .append(URLEncoder.encode(h.getValue(), "UTF-8")).append("\n");
+        // Canonical headers: lowercase names, sorted, values trimmed — never URL-encoded, which would
+        // not match what the server recomputes for any value holding a special character.
+        for (Map.Entry<String, String> h : canonicalHeaders(canonicalHeaders).entrySet()) {
+            canonicalRequest.append(h.getKey()).append(":").append(h.getValue()).append("\n");
         }
         canonicalRequest.append("\n");
-        canonicalRequest.append(headersNames.deleteCharAt(headersNames.length()-1).toString()).append("\n");
+        canonicalRequest.append(signedHeaders(canonicalHeaders)).append("\n");
         canonicalRequest.append(hashPayload);
 
         final String day = DATE_FORMAT.format(now);
@@ -74,6 +76,33 @@ public class AWS4Signature {
         return signature;
     }
 
+    /**
+     * The {@code SignedHeaders} part of the Authorization header: lowercase header names, sorted, joined
+     * by a semicolon. Shared with the canonical request so the two can never disagree.
+     */
+    public static String signedHeaders(MultiMap headers) {
+        return String.join(";", canonicalHeaders(headers).keySet());
+    }
+
+    /**
+     * Headers in canonical form, as SigV4 requires them: keyed by lowercase name, sorted by that name,
+     * values trimmed with sequential spaces collapsed, and repeated headers joined by a comma.
+     */
+    private static SortedMap<String, String> canonicalHeaders(MultiMap headers) {
+        final SortedMap<String, String> canonical = new TreeMap<>();
+        for (String name : headers.names()) {
+            final StringBuilder value = new StringBuilder();
+            for (String v : headers.getAll(name)) {
+                if (value.length() > 0) {
+                    value.append(",");
+                }
+                value.append(v == null ? "" : v.trim().replaceAll("\\s+", " "));
+            }
+            canonical.put(name.toLowerCase(Locale.ROOT), value.toString());
+        }
+        return canonical;
+    }
+
     public static String byteArrayToHex(byte[] a) {
         final StringBuilder sb = new StringBuilder(a.length * 2);
         for(byte b: a)
@@ -87,19 +116,30 @@ public class AWS4Signature {
         final String hashPayload = (payloadSha256 != null ? payloadSha256: EMPTY_PAYLOAD_SHA256);
         final Instant instant = Instant.now();
         final String now = DATETIME_FORMAT.format(instant);
-        MultiMap canonicalHeaders = MultiMap.caseInsensitiveMultiMap();
-        // for (Entry<String, String> e: request.headers().entries()) {
-		// 	canonicalHeaders.add(e.getKey(), e.getValue());
-		// }
-		canonicalHeaders.add("host", request.getHost());
-		canonicalHeaders.add("x-amz-content-sha256", hashPayload);
-		canonicalHeaders.add("x-amz-date", now);
+        final MultiMap canonicalHeaders = MultiMap.caseInsensitiveMultiMap();
+        canonicalHeaders.add("host", request.getHost());
+        // Every x-amz-* header carried by the request MUST be signed: S3 implementations reject the
+        // request otherwise, with AccessDenied / HeadersNotSigned naming the offending header. This
+        // covers object metadata (x-amz-meta-*), SSE-C keys and copy-source headers alike.
+        for (String name : request.headers().names()) {
+            if (name.toLowerCase(Locale.ROOT).startsWith(AMZ_HEADER_PREFIX)) {
+                for (String value : request.headers().getAll(name)) {
+                    canonicalHeaders.add(name, value);
+                }
+            }
+        }
+        // Added last, and after removal, so that re-signing an already signed request (a retry) keeps a
+        // single, up to date value rather than two conflicting ones.
+        canonicalHeaders.remove("x-amz-content-sha256");
+        canonicalHeaders.remove("x-amz-date");
+        canonicalHeaders.add("x-amz-content-sha256", hashPayload);
+        canonicalHeaders.add("x-amz-date", now);
 
         final String signature = sign(request.getMethod().name(), request.path(), Utils.getOrElse(request.query(), ""),
                 canonicalHeaders, region, accessKey, secretKey, payloadSha256, instant);
         request.putHeader("Authorization",
                 "AWS4-HMAC-SHA256 Credential=" + accessKey + "/" + DATE_FORMAT.format(instant) + "/" + region + "/s3/aws4_request, " +
-                "SignedHeaders=" + canonicalHeaders.names().stream().collect(Collectors.joining(";")) + ", " +
+                "SignedHeaders=" + signedHeaders(canonicalHeaders) + ", " +
                 "Signature=" + signature
         );
         request.putHeader("x-amz-content-sha256", hashPayload);
