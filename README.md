@@ -5,3 +5,6 @@
 * Développeur(s) : Edifice
 * Description : ensemble d'utilitaires web pour Vertx.
 
+
+
+Ce dépôt est un miroir officiel du dépôt Edifice : https://github.com/edificeio/web-utils
