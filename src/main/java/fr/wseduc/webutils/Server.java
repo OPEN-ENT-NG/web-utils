@@ -168,6 +168,24 @@ public abstract class Server extends AbstractVerticle {
     }
 
 
+	/**
+	 * Tests whether {@code candidate} resolves to a location inside {@code root}
+	 * once both paths are made absolute and normalized. Returns false on any
+	 * error or null argument. Used to confine served static resources under the
+	 * public directory and reject path-traversal (including absolute paths
+	 * containing "..").
+	 */
+	static boolean pathIsUnder(String root, String candidate) {
+		if (root == null || candidate == null) return false;
+		try {
+			final java.nio.file.Path base = java.nio.file.Paths.get(root).toAbsolutePath().normalize();
+			final java.nio.file.Path p = java.nio.file.Paths.get(candidate).toAbsolutePath().normalize();
+			return p.startsWith(base);
+		} catch (Exception e) {
+			return false;
+		}
+	}
+
 	public void init(Promise<Void> startPromise, Map<String,String> serverConfig) {
 		CookieHelper.getInstance().init(
 				serverConfig.get("signKey"), serverConfig.get("sameSiteValue"), log);
@@ -181,6 +199,13 @@ public abstract class Server extends AbstractVerticle {
 		// Serve public static resource like img, css, js. By convention in /public directory
 		rm.getWithRegEx(prefix.replaceAll("\\/", "\\/") + "\\/public\\/.+", request -> {
 			final String path = absolutePath(request.path().substring(prefix.length() + 1));
+			// Confine the resolved path under the module's public directory. This also
+			// covers absolute paths (which FileResolver returns as-is) and any ".."
+			// traversal, since both are caught after normalization.
+			if (path == null || !pathIsUnder(absolutePath("public"), path)) {
+				Renders.notFound(request);
+				return;
+			}
 			if (dev) {
 				request.response().sendFile(path, ar -> {
 					if (ar.failed() && !request.response().ended()) {
